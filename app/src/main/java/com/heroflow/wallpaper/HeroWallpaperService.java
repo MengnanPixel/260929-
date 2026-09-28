@@ -1,5 +1,5 @@
 package com.heroflow.wallpaper;
-
+import android.os.SystemClock;
 import android.app.*;
 import android.os.Handler;
 import android.service.wallpaper.WallpaperService;
