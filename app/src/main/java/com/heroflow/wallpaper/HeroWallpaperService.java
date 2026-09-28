@@ -51,26 +51,52 @@ public class HeroWallpaperService extends WallpaperService {
    SurfaceHolder sh=getSurfaceHolder(); Canvas c=null;
    try{
     c=sh.lockCanvas(); if(c==null)return;
-    int W=c.getWidth(), H=c.getHeight(); c.drawColor(Color.rgb(2,3,7));
+    int surfaceW=c.getWidth(), surfaceH=c.getHeight();
+    c.drawColor(Color.rgb(2,3,7));
+
+    // 强制“横屏作品”逻辑：
+    // 如果系统壁纸 Surface 是竖屏，就把整张画布旋转 90°，
+    // 这样用户把手机横过来时，五人会像 HTML 示例一样横向铺满。
+    boolean portraitSurface = surfaceH > surfaceW;
+    int W = portraitSurface ? surfaceH : surfaceW;
+    int H = portraitSurface ? surfaceW : surfaceH;
+
+    c.save();
+    if(portraitSurface){
+      c.rotate(90f);
+      c.translate(0f, -surfaceW);
+    }
+
     tilt += (targetTilt-tilt)*.13f;
     active=Math.max(0,Math.min(4,(int)(((tilt+42f)/84f)*5f)));
     phase+=0.055f;
 
-    float normalW=W*.115f, activeW=W*.54f;
-    float sum=activeW+normalW*4, x=(W-sum)/2f;
+    // 更接近 HTML 英雄选择：当前成员占约 46%，其他四人均分剩余空间。
+    float activeW=W*.46f, normalW=(W-activeW)/4f;
+    float x=0f;
     for(int i=0;i<5;i++){
      float w=(i==active)?activeW:normalW;
      drawHero(c,imgs[i],x,0,w,H,i,i==active);
      x+=w;
     }
-    // subtle HUD scanlines
-    p.setColor(0x16ffffff); p.setStrokeWidth(1);
+
+    // HUD 扫描线
+    p.setColor(0x14ffffff); p.setStrokeWidth(1);
     for(int y=0;y<H;y+=6)c.drawLine(0,y,W,y,p);
+
+    // 上下电影感渐暗，突出横屏构图
+    LinearGradient vignetteTop=new LinearGradient(0,0,0,H*.22f,0x8a000000,0x00000000,Shader.TileMode.CLAMP);
+    glow.setShader(vignetteTop); c.drawRect(0,0,W,H*.25f,glow);
+    LinearGradient vignetteBottom=new LinearGradient(0,H*.72f,0,H,0x00000000,0x9b000000,Shader.TileMode.CLAMP);
+    glow.setShader(vignetteBottom); c.drawRect(0,H*.68f,W,H,glow);
+    glow.setShader(null);
+
+    c.restore();
    } finally { if(c!=null) sh.unlockCanvasAndPost(c); }
   }
 
   void drawHero(Canvas c, Bitmap b, float x,float y,float w,float h,int idx,boolean on){
-   float scale=on?1.22f:1.03f;
+   float scale=on?1.34f:1.025f;
    float dw=w*scale, dh=h*scale;
    Rect src=new Rect(0,0,b.getWidth(),b.getHeight());
    float srcAspect=(float)b.getWidth()/b.getHeight(), dstAspect=dw/dh;
@@ -78,12 +104,12 @@ public class HeroWallpaperService extends WallpaperService {
    else { int nh=(int)(b.getWidth()/dstAspect); int top=(b.getHeight()-nh)/2; src.set(0,top,b.getWidth(),top+nh); }
    float shift=on?tilt*0.32f:0;
    RectF dst=new RectF(x-(dw-w)/2+shift,y-(dh-h)/2,dstX(x,w,dw,shift),y-(dh-h)/2+dh);
-   p.setAlpha(on?255:112); c.drawBitmap(b,src,dst,p);
+   p.setAlpha(on?255:92); c.drawBitmap(b,src,dst,p);
 
    if(on){
     c.save(); c.clipRect(x,0,x+w,h);
     float sx=x+w*(.5f+tilt/115f), sy=h*(.40f+(float)Math.sin(phase*.7f)*.06f);
-    RadialGradient rg=new RadialGradient(sx,sy,Math.max(w,h)*.34f,
+    RadialGradient rg=new RadialGradient(sx,sy,Math.max(w,h)*.42f,
       new int[]{0xb8ffffff,withAlpha(colors[idx],0x92),0x00222222},new float[]{0,.22f,1},Shader.TileMode.CLAMP);
     glow.setShader(rg); glow.setBlendMode(BlendMode.SCREEN); c.drawRect(x,0,x+w,h,glow);
     float band=(float)((Math.sin(phase)+1)*.5)*(h*1.25f)-h*.12f;

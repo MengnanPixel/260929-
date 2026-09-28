@@ -1,0 +1,14 @@
+横屏 V2：
+- 即使安卓桌面/动态壁纸预览页给的是竖屏 Surface，也把壁纸内容旋转成横向作品。
+- 把手机横过来观看时，五位成员按 HTML 英雄选择界面横向铺满。
+- 当前成员宽度约 46%，整张人物图进一步放大。
+- 其他四位成员进一步压暗。
+- 保留陀螺仪选人、角色色高光、流光扫光。
+
+更新现有 GitHub 仓库：
+1. 在 Codespaces 上传本 ZIP。
+2. 终端执行：
+   unzip -o HeroFlow_横屏壁纸V2_覆盖更新包.zip && rm HeroFlow_横屏壁纸V2_覆盖更新包.zip
+3. 再执行：
+   git add . && git commit -m "Landscape wallpaper V2" && git push
+4. 回 GitHub Actions 等绿色勾，下载新的 APK。
