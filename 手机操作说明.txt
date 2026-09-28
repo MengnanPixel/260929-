@@ -1,0 +1,25 @@
+【只用安卓手机生成 APK】
+
+准备：一个 GitHub 账号 + 手机浏览器。
+
+1. 打开 GitHub，新建一个仓库（Repository），名字可填 HeroFlowLiveWallpaper。
+2. 进入仓库，选择 Add file → Upload files。
+3. 解压本 ZIP，把“HeroFlowLiveWallpaper”文件夹里面的内容全部上传到仓库根目录。
+   重点：仓库首页要直接看见 app、.github、build.gradle.kts、settings.gradle.kts，
+   不要再套一层文件夹。
+4. 提交上传（Commit changes）。
+5. 打开仓库的 Actions 标签页。
+6. 找到 “Build Android APK”。
+   上传到 main/master 后通常会自动开始；也可以点 Run workflow 手动运行。
+7. 等待绿色 ✓。
+8. 点进这次成功的运行，在页面下方 Artifacts 找：
+   HeroFlow-Live-Wallpaper-APK
+9. 下载它。GitHub 下载的是一个 ZIP，解压后里面就是：
+   HeroFlow-Live-Wallpaper.apk
+10. 点 APK 安装。Android 如果提示“禁止安装未知应用”，给当前浏览器/文件管理器一次安装权限。
+11. 打开 Hero Flow Wallpaper → “预览并设置动态壁纸”。
+
+注意：
+- 这是 Debug 签名 APK，适合你自己手机安装测试，不需要自己配置签名证书。
+- Android 8.0+ 可安装。
+- 动态壁纸实际显示方向受你的桌面 Launcher 支持情况影响。

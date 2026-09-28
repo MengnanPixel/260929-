@@ -1,0 +1,23 @@
+手机上传专用版
+
+解压 ZIP 后，你看到的第一层就应该是：
+.github/
+app/
+build.gradle.kts
+settings.gradle.kts
+README.md
+00_手机上传说明.txt
+
+重要：
+GitHub 仓库首页最终必须直接看到 app 和 .github 两个文件夹。
+不要把 app 里面的 AndroidManifest.xml、Java 文件等单独拿出来上传。
+
+如果手机网页的“Upload files”不能上传整个文件夹结构，请不要继续上传散文件。
+更简单的方法是在 GitHub 手机上创建 Codespace，然后把这个 ZIP 上传并在终端解压；
+或者使用支持“上传文件夹”的 Git 客户端。
+
+Actions 正确识别后，页面会出现：
+Build Android APK
+
+成功运行后，Artifacts 中下载：
+HeroFlow-Live-Wallpaper-APK
