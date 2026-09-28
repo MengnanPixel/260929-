@@ -20,7 +20,7 @@ public class HeroWallpaperService extends WallpaperService {
   Bitmap[] imgs=new Bitmap[5];
   int[] colors={0xff2dff9a,0xffb65cff,0xff35a7ff,0xffff5ebc,0xffff3d3d};
   SensorManager sm; Sensor sensor;
-  boolean visible=false; float tilt=0f, targetTilt=0f, phase=0f; int active=2;
+  boolean visible=false; float tilt=0f, targetTilt=0f, phase=0f; int active=2; long touchLockUntil=0L;
   final Runnable drawTask=new Runnable(){ public void run(){ drawFrame(); if(visible) h.postDelayed(this,33); }};
 
   HeroEngine(){
@@ -31,6 +31,39 @@ public class HeroWallpaperService extends WallpaperService {
    if(sensor==null) sensor=sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
   }
   Bitmap load(int id){ return BitmapFactory.decodeResource(getResources(),id); }
+
+  @Override public void onCreate(SurfaceHolder holder){
+   super.onCreate(holder);
+   setTouchEventsEnabled(true);
+  }
+
+  @Override public void onTouchEvent(android.view.MotionEvent event){
+   if(event.getAction()!=android.view.MotionEvent.ACTION_DOWN) return;
+   int sw=Math.max(1,getSurfaceHolder().getSurfaceFrame().width());
+   int sh=Math.max(1,getSurfaceHolder().getSurfaceFrame().height());
+
+   // 壁纸内容被强制设计成横屏。竖屏 Surface 时，把触点坐标映射回旋转后的横屏坐标。
+   float landscapeX;
+   float landscapeW;
+   if(sh>sw){
+     landscapeX=event.getY();
+     landscapeW=sh;
+   }else{
+     landscapeX=event.getX();
+     landscapeW=sw;
+   }
+
+   int idx=Math.max(0,Math.min(4,(int)(landscapeX/(landscapeW/5f))));
+   active=idx;
+
+   // 点击后短暂锁定当前成员，避免陀螺仪立刻把选择抢回去。
+   touchLockUntil=android.os.SystemClock.uptimeMillis()+2200L;
+
+   // 同步陀螺仪目标到该成员中心，锁定结束后过渡更自然。
+   targetTilt=-42f + (idx+.5f)*(84f/5f);
+   tilt=targetTilt;
+   drawFrame();
+  }
 
   @Override public void onVisibilityChanged(boolean v){
    visible=v; h.removeCallbacks(drawTask);
@@ -68,11 +101,11 @@ public class HeroWallpaperService extends WallpaperService {
     }
 
     tilt += (targetTilt-tilt)*.13f;
-    active=Math.max(0,Math.min(4,(int)(((tilt+42f)/84f)*5f)));
+    if(android.os.SystemClock.uptimeMillis()>=touchLockUntil) active=Math.max(0,Math.min(4,(int)(((tilt+42f)/84f)*5f)));
     phase+=0.055f;
 
     // 更接近 HTML 英雄选择：当前成员占约 46%，其他四人均分剩余空间。
-    float activeW=W*.46f, normalW=(W-activeW)/4f;
+    float activeW=W*(6f/25f), normalW=W*(19f/100f);
     float x=0f;
     for(int i=0;i<5;i++){
      float w=(i==active)?activeW:normalW;
@@ -96,7 +129,7 @@ public class HeroWallpaperService extends WallpaperService {
   }
 
   void drawHero(Canvas c, Bitmap b, float x,float y,float w,float h,int idx,boolean on){
-   float scale=on?1.34f:1.025f;
+   float scale=on?1.12f:1.015f;
    float dw=w*scale, dh=h*scale;
    Rect src=new Rect(0,0,b.getWidth(),b.getHeight());
    float srcAspect=(float)b.getWidth()/b.getHeight(), dstAspect=dw/dh;
@@ -104,7 +137,7 @@ public class HeroWallpaperService extends WallpaperService {
    else { int nh=(int)(b.getWidth()/dstAspect); int top=(b.getHeight()-nh)/2; src.set(0,top,b.getWidth(),top+nh); }
    float shift=on?tilt*0.32f:0;
    RectF dst=new RectF(x-(dw-w)/2+shift,y-(dh-h)/2,dstX(x,w,dw,shift),y-(dh-h)/2+dh);
-   p.setAlpha(on?255:92); c.drawBitmap(b,src,dst,p);
+   p.setAlpha(on?255:155); c.drawBitmap(b,src,dst,p);
 
    if(on){
     c.save(); c.clipRect(x,0,x+w,h);
@@ -119,7 +152,7 @@ public class HeroWallpaperService extends WallpaperService {
     glow.setShader(lg); c.rotate(-10,x+w/2,h/2); c.drawRect(x-w*.25f,band-h*.16f,x+w*1.25f,band+h*.16f,glow);
     glow.setShader(null); glow.setBlendMode(null); c.restore();
    } else {
-    p.setColor(0x72000000); c.drawRect(x,0,x+w,h,p);
+    p.setColor(0x48000000); c.drawRect(x,0,x+w,h,p);
    }
   }
   float dstX(float x,float w,float dw,float shift){return x-(dw-w)/2+shift+dw;}
