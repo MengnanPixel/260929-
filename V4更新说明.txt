@@ -1,0 +1,10 @@
+V4：
+- 点击/切换瞬间增加自下而上的快速炫彩扫光。
+- ACTION_MOVE 连续追踪：手指在五位成员上来回滑动，焦点、放大、流光跟手。
+- 陀螺仪姿态映射增强约 1.42 倍，平滑响应从 0.13 提升到 0.28；无 rotation vector 时 gyro 增益也提高。
+- 五栏宽度改为连续插值，目标仍约 24% / 19%，跨人物边界更丝滑。
+- 点击释放后只短暂保留焦点，随后自然交回陀螺仪。
+
+Codespaces 覆盖：
+unzip -o HeroFlow_横屏壁纸V4_跟手流光+灵敏陀螺仪.zip && rm HeroFlow_横屏壁纸V4_跟手流光+灵敏陀螺仪.zip
+git add . && git commit -m "V4 fluid touch and gyro" && git push

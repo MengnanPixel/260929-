@@ -20,7 +20,7 @@ public class HeroWallpaperService extends WallpaperService {
   Bitmap[] imgs=new Bitmap[5];
   int[] colors={0xff2dff9a,0xffb65cff,0xff35a7ff,0xffff5ebc,0xffff3d3d};
   SensorManager sm; Sensor sensor;
-  boolean visible=false; float tilt=0f, targetTilt=0f, phase=0f; int active=2; long touchLockUntil=0L;
+  boolean visible=false; float tilt=0f, targetTilt=0f, phase=0f; int active=2; long touchLockUntil=0L; boolean touching=false; float touchX=-1f; float selectFlash=0f;
   final Runnable drawTask=new Runnable(){ public void run(){ drawFrame(); if(visible) h.postDelayed(this,33); }};
 
   HeroEngine(){
@@ -38,31 +38,28 @@ public class HeroWallpaperService extends WallpaperService {
   }
 
   @Override public void onTouchEvent(android.view.MotionEvent event){
-   if(event.getAction()!=android.view.MotionEvent.ACTION_DOWN) return;
+   int action=event.getActionMasked();
    int sw=Math.max(1,getSurfaceHolder().getSurfaceFrame().width());
    int sh=Math.max(1,getSurfaceHolder().getSurfaceFrame().height());
+   float landscapeX=(sh>sw)?event.getY():event.getX();
+   float landscapeW=(sh>sw)?sh:sw;
 
-   // 壁纸内容被强制设计成横屏。竖屏 Surface 时，把触点坐标映射回旋转后的横屏坐标。
-   float landscapeX;
-   float landscapeW;
-   if(sh>sw){
-     landscapeX=event.getY();
-     landscapeW=sh;
-   }else{
-     landscapeX=event.getX();
-     landscapeW=sw;
+   if(action==android.view.MotionEvent.ACTION_DOWN || action==android.view.MotionEvent.ACTION_MOVE){
+     touching=true;
+     touchX=Math.max(0f,Math.min(landscapeW-1f,landscapeX));
+     int idx=Math.max(0,Math.min(4,(int)(touchX/(landscapeW/5f))));
+     if(idx!=active){ active=idx; selectFlash=1f; }
+     else if(action==android.view.MotionEvent.ACTION_DOWN) selectFlash=1f;
+
+     // 手指在五位成员上连续滑动时，焦点和流光实时追随。
+     targetTilt=-42f + (touchX/landscapeW)*84f;
+     tilt=targetTilt;
+     touchLockUntil=android.os.SystemClock.uptimeMillis()+650L;
+     drawFrame();
+   } else if(action==android.view.MotionEvent.ACTION_UP || action==android.view.MotionEvent.ACTION_CANCEL){
+     touching=false;
+     touchLockUntil=android.os.SystemClock.uptimeMillis()+450L;
    }
-
-   int idx=Math.max(0,Math.min(4,(int)(landscapeX/(landscapeW/5f))));
-   active=idx;
-
-   // 点击后短暂锁定当前成员，避免陀螺仪立刻把选择抢回去。
-   touchLockUntil=android.os.SystemClock.uptimeMillis()+2200L;
-
-   // 同步陀螺仪目标到该成员中心，锁定结束后过渡更自然。
-   targetTilt=-42f + (idx+.5f)*(84f/5f);
-   tilt=targetTilt;
-   drawFrame();
   }
 
   @Override public void onVisibilityChanged(boolean v){
@@ -74,8 +71,8 @@ public class HeroWallpaperService extends WallpaperService {
   @Override public void onSensorChanged(SensorEvent e){
    if(e.sensor.getType()==Sensor.TYPE_ROTATION_VECTOR){
     float[] r=new float[9], o=new float[3]; SensorManager.getRotationMatrixFromVector(r,e.values); SensorManager.getOrientation(r,o);
-    targetTilt=(float)Math.toDegrees(o[2]);
-   } else targetTilt += e.values[1]*1.6f;
+    targetTilt=(float)Math.toDegrees(o[2])*1.42f;
+   } else targetTilt += e.values[1]*2.65f;
    targetTilt=Math.max(-42,Math.min(42,targetTilt));
   }
   @Override public void onAccuracyChanged(Sensor s,int a){}
@@ -100,17 +97,29 @@ public class HeroWallpaperService extends WallpaperService {
       c.translate(0f, -surfaceW);
     }
 
-    tilt += (targetTilt-tilt)*.13f;
+    tilt += (targetTilt-tilt)*.28f;
     if(android.os.SystemClock.uptimeMillis()>=touchLockUntil) active=Math.max(0,Math.min(4,(int)(((tilt+42f)/84f)*5f)));
-    phase+=0.055f;
+    phase+=0.070f; selectFlash*=0.78f;
 
     // 更接近 HTML 英雄选择：当前成员占约 46%，其他四人均分剩余空间。
-    float activeW=W*(6f/25f), normalW=W*(19f/100f);
+    float focusPos;
+    if(touching && touchX>=0f) focusPos=(touchX/W)*5f-.5f;
+    else focusPos=((tilt+42f)/84f)*5f-.5f;
+    focusPos=Math.max(0f,Math.min(4f,focusPos));
+
+    // 宽度连续插值：最大仍约 24%，其余接近 19%，跨成员时不会突然跳变。
+    float[] weights=new float[5]; float total=0f;
+    for(int i=0;i<5;i++){
+      float d=Math.abs(i-focusPos);
+      float emphasis=Math.max(0f,1f-d);
+      weights[i]=.19f+.05f*emphasis;
+      total+=weights[i];
+    }
     float x=0f;
     for(int i=0;i<5;i++){
-     float w=(i==active)?activeW:normalW;
-     drawHero(c,imgs[i],x,0,w,H,i,i==active);
-     x+=w;
+      float w=W*(weights[i]/total);
+      drawHero(c,imgs[i],x,0,w,H,i,i==active);
+      x+=w;
     }
 
     // HUD 扫描线
@@ -141,6 +150,17 @@ public class HeroWallpaperService extends WallpaperService {
 
    if(on){
     c.save(); c.clipRect(x,0,x+w,h);
+
+    // 切换瞬间：一束高亮炫彩从下往上快速扫过，约数百毫秒衰减。
+    if(selectFlash>.035f){
+      float fy=h*(1.10f-selectFlash*1.15f);
+      LinearGradient flashGrad=new LinearGradient(x,fy+h*.18f,x+w,fy-h*.18f,
+        new int[]{0x00ffffff,withAlpha(colors[idx],0x88),0xeeffffff,withAlpha(colors[idx],0x99),0x00ffffff},
+        null,Shader.TileMode.CLAMP);
+      glow.setShader(flashGrad); glow.setBlendMode(BlendMode.SCREEN);
+      c.drawRect(x-w*.15f,fy-h*.22f,x+w*1.15f,fy+h*.22f,glow);
+      glow.setShader(null); glow.setBlendMode(null);
+    }
     float sx=x+w*(.5f+tilt/115f), sy=h*(.40f+(float)Math.sin(phase*.7f)*.06f);
     RadialGradient rg=new RadialGradient(sx,sy,Math.max(w,h)*.42f,
       new int[]{0xb8ffffff,withAlpha(colors[idx],0x92),0x00222222},new float[]{0,.22f,1},Shader.TileMode.CLAMP);
