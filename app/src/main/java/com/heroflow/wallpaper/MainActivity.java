@@ -30,7 +30,7 @@ public class MainActivity extends Activity {
   inv.setOnCheckedChangeListener((v,c)->sp.edit().putBoolean("invert",c).apply());
   l.addView(inv);
 
-  TextView st=new TextView(this); st.setText("陀螺仪灵敏度（往右更灵敏）"); st.setPadding(0,32,0,0); l.addView(st);
+  TextView st=new TextView(this); st.setText("陀螺仪灵敏度（左：很慢 → 右：很灵敏）"); st.setPadding(0,32,0,0); l.addView(st);
   SeekBar sb=new SeekBar(this); sb.setMax(100); sb.setProgress(sp.getInt("sens",50));
   sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
    public void onProgressChanged(SeekBar s,int p,boolean u){ sp.edit().putInt("sens",p).apply(); }

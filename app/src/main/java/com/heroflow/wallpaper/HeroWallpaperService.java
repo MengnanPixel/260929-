@@ -152,7 +152,7 @@ public class HeroWallpaperService extends WallpaperService {
    gyroEnabled = p.getBoolean("gyro", true);
    gyroInvert = p.getBoolean("invert", false);
    int sens = p.getInt("sens", 50);                       // 0..100
-   gyroGain = GYRO_BASE_GAIN * (0.4f + 1.2f * sens / 100f);
+   gyroGain = GYRO_BASE_GAIN * 0.2f * (float) Math.pow(25.0, sens / 100.0);   // 0.2x ~ 5x，指数变化，两端差别明显
   }
 
   // 画布 +x 方向对应设备 Y 轴的哪一侧：随屏幕旋转变化
@@ -409,7 +409,7 @@ public class HeroWallpaperService extends WallpaperService {
    Bitmap b = bmp[i];
    float PW = b.getWidth(), PH = b.getHeight();
    float da = (float) w / H;
-   float sH = PH * .87f, sW = sH * da;
+   float sH = PH * .94f, sW = sH * da;
    if (sW > PW) { sW = PW; sH = sW / da; }
    sW /= zoom; sH /= zoom;
 
@@ -417,8 +417,8 @@ public class HeroWallpaperService extends WallpaperService {
    float fxn = clamp((fx - x) / w, 0f, 1f) * 2f - 1f;
    float fyn = clamp(fy / H, 0f, 1f) * 2f - 1f;
    float pan = touchAmt * prox;
-   float nx = clamp(fxn * pan * .5f + clamp(focus - i, -1f, 1f) * .35f, -1f, 1f);
-   float ny = clamp(fyn * pan * .8f, -1f, 1f);
+   float nx = clamp(fxn * pan * .18f + clamp(focus - i, -1f, 1f) * .06f, -1f, 1f);
+   float ny = clamp(fyn * pan * .30f, -1f, 1f);
    float cx = PW / 2f + (PW - sW) / 2f * nx;
    float cy = PH / 2f + (PH - sH) / 2f * ny;
    float s = w / sW;
