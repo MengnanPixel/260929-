@@ -1,173 +1,487 @@
 package com.heroflow.wallpaper;
-import android.os.SystemClock;
-import android.app.*;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.BitmapShader;
+import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.RadialGradient;
+import android.graphics.Shader;
+import android.graphics.Xfermode;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.hardware.display.DisplayManager;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Process;
 import android.service.wallpaper.WallpaperService;
+import android.view.Choreographer;
+import android.view.Display;
+import android.view.MotionEvent;
 import android.view.SurfaceHolder;
-import android.graphics.*;
-import android.graphics.drawable.*;
-import android.hardware.*;
-import android.content.*;
-import java.util.*;
 
+/**
+ * HeroFlow V6
+ * - 硬件加速 Canvas + 独立渲染线程 + Choreographer(跟随屏幕刷新率)
+ * - 所有动画按真实时间(dt)计算，不再依赖帧数
+ * - 点击：轻微放大 + 快速炫光扫过(约 0.3 秒)
+ * - 手指滑动：焦点、放大、光晕、光带全部连续跟随手指
+ * - 陀螺仪：晃动手机来回切换人物（对角速度积分，不受握持姿势影响）
+ * - 画面静止时停止绘制，不耗电
+ */
 public class HeroWallpaperService extends WallpaperService {
- @Override public Engine onCreateEngine(){ return new HeroEngine(); }
 
- class HeroEngine extends Engine implements SensorEventListener {
-  final Handler h=new Handler();
-  final Paint bitmapPaint=new Paint(Paint.FILTER_BITMAP_FLAG);
-  final Paint fxPaint=new Paint();
-  final Paint dimPaint=new Paint();
-  final Rect src=new Rect();
-  final RectF dst=new RectF();
-  final float[] widths=new float[5], targetWidths=new float[5];
-  Bitmap[] imgs=new Bitmap[5];
-  int[] colors={0xff2dff9a,0xffb65cff,0xff35a7ff,0xffff5ebc,0xffff3d3d};
+ static final int N = 5;
+ static final int BG = 0xff030408;
+ static final int[] COLORS = {0xff2dff9a, 0xffb65cff, 0xff35a7ff, 0xffff5ebc, 0xffff3d3d};
+ static final int[] RES = {R.drawable.hero_1, R.drawable.hero_2, R.drawable.hero_3, R.drawable.hero_4, R.drawable.hero_5};
 
-  SensorManager sm; Sensor sensor;
-  boolean visible=false,touching=false;
-  float tilt=0,targetTilt=0,focus=2,targetFocus=2,touchX=-1,phase=0,flash=0;
-  int active=2,lastActive=2;
-  long lastFrame=0;
+ // ---- 可调参数 ----
+ static final float SWEEP_MS = 300f;        // 一次炫光扫过时长(越小越快)
+ static final float BURST_MS = 260f;        // 点击瞬间的光爆时长
+ static final float GYRO_BASE_GAIN = 0.25f; // 每转 1° 移动多少个人物位(再乘“灵敏度”)
+ static final float GYRO_DEADZONE = 0.03f;  // rad/s，小于此值视为静止
+ static final float K_TOUCH_FOCUS = 45f;    // 手指焦点跟随时间常数(ms)，越小越跟手
+ static final float K_FREE_FOCUS = 100f;    // 陀螺仪焦点跟随时间常数(ms)
 
-  // 约 30fps；不在触摸时不额外重复 drawFrame，避免 V4 的重复绘制造成卡顿。
-  final Runnable drawTask=new Runnable(){ public void run(){
-    if(!visible)return;
-    long now=SystemClock.uptimeMillis();
-    if(now-lastFrame>=31){ drawFrame(); lastFrame=now; }
-    h.postDelayed(this,16);
-  }};
+ @Override public Engine onCreateEngine() { return new HeroEngine(); }
 
-  HeroEngine(){
-   imgs[0]=load(R.drawable.hero_1); imgs[1]=load(R.drawable.hero_2); imgs[2]=load(R.drawable.hero_3);
-   imgs[3]=load(R.drawable.hero_4); imgs[4]=load(R.drawable.hero_5);
-   sm=(SensorManager)getSystemService(SENSOR_SERVICE);
-   sensor=sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
-   if(sensor==null)sensor=sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-   for(int i=0;i<5;i++)widths[i]=.20f;
-  }
-  Bitmap load(int id){return BitmapFactory.decodeResource(getResources(),id);}
+ class HeroEngine extends Engine implements SensorEventListener, Choreographer.FrameCallback {
 
-  @Override public void onCreate(SurfaceHolder holder){super.onCreate(holder);setTouchEventsEnabled(true);}
+  // ---------- 线程 / 生命周期 ----------
+  final Object lock = new Object();
+  HandlerThread ht;
+  Handler rh;                       // 渲染线程 Handler
+  Choreographer chor;
+  volatile boolean visible = false, surfaceOk = false;
+  volatile int surfW = 0, surfH = 0;
+  boolean framePending = false;
+  long lastNanos = 0;
 
-  @Override public void onTouchEvent(android.view.MotionEvent e){
-   int a=e.getActionMasked();
-   int sw=Math.max(1,getSurfaceHolder().getSurfaceFrame().width()), sh=Math.max(1,getSurfaceHolder().getSurfaceFrame().height());
-   float W=(sh>sw)?sh:sw;
-   float lx=(sh>sw)?e.getY():e.getX();
-   if(a==android.view.MotionEvent.ACTION_DOWN||a==android.view.MotionEvent.ACTION_MOVE){
-    touching=true; touchX=Math.max(0,Math.min(W-1,lx));
-    targetFocus=Math.max(0,Math.min(4,(touchX/W)*5f-.5f));
-   }else if(a==android.view.MotionEvent.ACTION_UP||a==android.view.MotionEvent.ACTION_CANCEL){
-    touching=false;
-   }
-  }
+  // ---------- 传感器 ----------
+  SensorManager sm;
+  Sensor gyro;
+  boolean gyroEnabled = true, gyroInvert = false;
+  float gyroGain = GYRO_BASE_GAIN;
+  float dirSign = -1f;              // 由屏幕旋转决定
+  long lastSensorNs = 0;
 
-  @Override public void onVisibilityChanged(boolean v){
-   visible=v;h.removeCallbacks(drawTask);
-   if(v){if(sensor!=null)sm.registerListener(this,sensor,SensorManager.SENSOR_DELAY_GAME);h.post(drawTask);}
-   else sm.unregisterListener(this);
-  }
-  @Override public void onSurfaceDestroyed(SurfaceHolder holder){super.onSurfaceDestroyed(holder);visible=false;h.removeCallbacks(drawTask);sm.unregisterListener(this);}
-  @Override public void onAccuracyChanged(Sensor s,int a){}
+  // ---------- 图像 / 画笔(只在渲染线程使用) ----------
+  final Bitmap[] bmp = new Bitmap[N];
+  final BitmapShader[] bShader = new BitmapShader[N];
+  final Paint[] imgPaint = new Paint[N];
+  final Paint[] bandPaint = new Paint[N];
+  final Paint[] glowPaint = new Paint[N];
+  final Paint[] fillPaint = new Paint[N];
+  Paint whiteGlow;
+  final Matrix m = new Matrix();
+  int lW = 0, lH = 0;
 
-  @Override public void onSensorChanged(SensorEvent e){
-   if(touching)return;
-   if(e.sensor.getType()==Sensor.TYPE_ROTATION_VECTOR){
-    float[] r=new float[9],o=new float[3];
-    SensorManager.getRotationMatrixFromVector(r,e.values);SensorManager.getOrientation(r,o);
-    targetTilt=Math.max(-36,Math.min(36,(float)Math.toDegrees(o[2])*1.22f));
-   }else{
-    targetTilt=Math.max(-36,Math.min(36,targetTilt+e.values[1]*1.45f));
-   }
-   targetFocus=Math.max(0,Math.min(4,((targetTilt+36f)/72f)*5f-.5f));
+  // ---------- 动画状态(只在渲染线程使用) ----------
+  float focus = 2f, focusT = 2f;
+  final float[] wid = new float[N];
+  boolean touching = false;
+  float touchAmt = 0f, pulse = 0f;
+  float fx, fy, fxT, fyT;           // 手指位置(逻辑横屏坐标)，fx/fy 为平滑后
+  final float[] sweepT = {-1, -1, -1, -1, -1};
+  float burstT = -1f, burstX, burstY;
+  int burstIdx = 0, lastActive = -1;
+
+  // =====================================================================
+  @Override public void onCreate(SurfaceHolder holder) {
+   super.onCreate(holder);
+   setTouchEventsEnabled(true);
+   for (int i = 0; i < N; i++) wid[i] = .2f;
+   sm = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+   gyro = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+   ht = new HandlerThread("HeroRender", Process.THREAD_PRIORITY_DISPLAY);
+   ht.start();
+   rh = new Handler(ht.getLooper());
+   rh.post(new Runnable() { public void run() { chor = Choreographer.getInstance(); initPaints(); } });
   }
 
-  void drawFrame(){
-   SurfaceHolder sh=getSurfaceHolder();Canvas c=null;
-   try{
-    c=sh.lockCanvas();if(c==null)return;
-    int sw=c.getWidth(),shh=c.getHeight();
-    boolean portrait=shh>sw;
-    int W=portrait?shh:sw,H=portrait?sw:shh;
-    c.drawColor(Color.rgb(3,4,8));
-    c.save();
-    if(portrait){c.rotate(90);c.translate(0,-sw);}
+  @Override public void onDestroy() {
+   visible = false;
+   sm.unregisterListener(this);
+   if (ht != null) ht.quitSafely();
+   super.onDestroy();
+  }
 
-    // 类似电脑 HTML：焦点不是“跳格子”，而是连续追随指针/倾斜位置。
-    focus+=(targetFocus-focus)*.20f;
-    tilt+=(targetTilt-tilt)*.16f;
-    active=Math.max(0,Math.min(4,Math.round(focus)));
-    if(active!=lastActive){flash=1f;lastActive=active;}
-    flash*=.76f; phase+=.10f;
+  @Override public void onSurfaceCreated(SurfaceHolder holder) {
+   super.onSurfaceCreated(holder);
+   surfaceOk = true;
+  }
 
-    // 默认 20%；焦点人物最多约 24%，邻近栏平滑让位。
-    float total=0;
-    for(int i=0;i<5;i++){
-     float d=Math.abs(i-focus);
-     float e=Math.max(0,1-d);
-     targetWidths[i]=.19f+.05f*e;
-     widths[i]+=(targetWidths[i]-widths[i])*.22f;
-     total+=widths[i];
+  @Override public void onSurfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+   super.onSurfaceChanged(holder, format, w, h);
+   surfW = w; surfH = h;
+   rh.post(new Runnable() { public void run() { updateRotation(); requestFrame(); } });
+  }
+
+  @Override public void onSurfaceDestroyed(SurfaceHolder holder) {
+   synchronized (lock) { surfaceOk = false; }
+   super.onSurfaceDestroyed(holder);
+  }
+
+  @Override public void onVisibilityChanged(final boolean v) {
+   visible = v;
+   rh.post(new Runnable() { public void run() {
+    if (v) {
+     loadPrefs(); updateRotation();
+     lastNanos = 0; lastSensorNs = 0;
+     sm.unregisterListener(HeroEngine.this);
+     if (gyro != null && gyroEnabled) sm.registerListener(HeroEngine.this, gyro, SensorManager.SENSOR_DELAY_GAME, rh);
+     requestFrame();
+    } else {
+     sm.unregisterListener(HeroEngine.this);
+     touching = false;
     }
-
-    float x=0;
-    for(int i=0;i<5;i++){
-     float w=W*widths[i]/total;
-     float proximity=Math.max(0,1-Math.abs(i-focus));
-     drawHero(c,imgs[i],x,w,H,i,proximity);
-     x+=w;
-    }
-
-    c.restore();
-   }finally{if(c!=null)sh.unlockCanvasAndPost(c);}
+   }});
   }
 
-  void drawHero(Canvas c,Bitmap b,float x,float w,float h,int idx,float proximity){
-   // 电脑版本观感：轻微放大，不再把整个人突然弹大。
-   float scale=1.0f+.075f*proximity;
-   float dw=w*scale,dh=h*scale;
-   src.set(0,0,b.getWidth(),b.getHeight());
-   float sa=(float)b.getWidth()/b.getHeight(), da=dw/dh;
-   if(sa>da){int nw=(int)(b.getHeight()*da),l=(b.getWidth()-nw)/2;src.set(l,0,l+nw,b.getHeight());}
-   else{int nh=(int)(b.getWidth()/da),t=(b.getHeight()-nh)/2;src.set(0,t,b.getWidth(),t+nh);}
-   float parallax=(focus-idx)*-3.0f;
-   dst.set(x-(dw-w)/2+parallax,-(dh-h)/2,x-(dw-w)/2+parallax+dw,-(dh-h)/2+dh);
-   bitmapPaint.setAlpha((int)(165+90*proximity));
-   c.drawBitmap(b,src,dst,bitmapPaint);
+  void loadPrefs() {
+   SharedPreferences p = getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE);
+   gyroEnabled = p.getBoolean("gyro", true);
+   gyroInvert = p.getBoolean("invert", false);
+   int sens = p.getInt("sens", 50);                       // 0..100
+   gyroGain = GYRO_BASE_GAIN * (0.4f + 1.2f * sens / 100f);
+  }
 
-   // 未聚焦成员只轻压暗。
-   if(proximity<.98f){
-    dimPaint.setColor((int)((1-proximity)*70)<<24);
-    c.drawRect(x,0,x+w,h,dimPaint);
+  // 画布 +x 方向对应设备 Y 轴的哪一侧：随屏幕旋转变化
+  void updateRotation() {
+   int rot = 0;
+   try {
+    DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+    Display d = dm.getDisplay(Display.DEFAULT_DISPLAY);
+    if (d != null) rot = d.getRotation();
+   } catch (Exception ignored) { }
+   dirSign = (rot == 0 || rot == 1) ? -1f : 1f;
+  }
+
+  // =====================================================================
+  //  画笔：全部预先创建，逐帧不再分配对象
+  // =====================================================================
+  void initPaints() {
+   Xfermode scr = new PorterDuffXfermode(PorterDuff.Mode.SCREEN);
+   for (int i = 0; i < N; i++) {
+    int c = COLORS[i], b = COLORS[(i + 2) % N], a = COLORS[(i + 4) % N];
+    // 光带：白色高亮核心，两侧是主色和邻近色，形成“炫彩”边缘
+    int[] cols = {al(b, 0), al(b, 80), al(c, 205), 0xffffffff, al(c, 205), al(a, 80), al(a, 0)};
+    float[] pos = {0f, .20f, .40f, .50f, .60f, .80f, 1f};
+    bandPaint[i] = new Paint();
+    bandPaint[i].setShader(new LinearGradient(0, -1, 0, 1, cols, pos, Shader.TileMode.CLAMP));
+    bandPaint[i].setXfermode(scr);
+
+    glowPaint[i] = new Paint();
+    glowPaint[i].setShader(new RadialGradient(0, 0, 1,
+      new int[]{al(c, 255), al(c, 110), al(c, 0)}, new float[]{0f, .45f, 1f}, Shader.TileMode.CLAMP));
+    glowPaint[i].setXfermode(scr);
+
+    fillPaint[i] = new Paint();
+    fillPaint[i].setColor(c);
+    fillPaint[i].setXfermode(scr);
    }
+   whiteGlow = new Paint();
+   whiteGlow.setShader(new RadialGradient(0, 0, 1,
+     new int[]{0xffffffff, 0x66ffffff, 0x00ffffff}, new float[]{0f, .40f, 1f}, Shader.TileMode.CLAMP));
+   whiteGlow.setXfermode(scr);
+  }
 
-   if(proximity>.02f){
-    c.save();c.clipRect(x,0,x+w,h);
-    int col=colors[idx];
-
-    // 不再每帧创建 RadialGradient/LinearGradient：用两层半透明几何光带模拟 HTML 流光，GPU/CPU 压力小很多。
-    fxPaint.setBlendMode(BlendMode.SCREEN);
-    float a=proximity;
-    float bandY=h*(.72f-(float)Math.sin(phase)*.08f);
-    fxPaint.setColor(withAlpha(col,(int)(42+68*a)));
-    c.rotate(-12,x+w/2,h/2);
-    c.drawRect(x-w*.18f,bandY-h*.075f,x+w*1.18f,bandY+h*.075f,fxPaint);
-    fxPaint.setColor(withAlpha(0xffffffff,(int)(22+42*a)));
-    c.drawRect(x-w*.12f,bandY-h*.025f,x+w*1.12f,bandY+h*.025f,fxPaint);
-
-    // 切换成员时快速由下往上闪一下；只有短暂几帧。
-    if(idx==active && flash>.035f){
-     float fy=h*(1.08f-flash*1.05f);
-     fxPaint.setColor(withAlpha(col,(int)(120*flash)));
-     c.drawRect(x-w*.12f,fy-h*.08f,x+w*1.12f,fy+h*.08f,fxPaint);
-     fxPaint.setColor(withAlpha(0xffffffff,(int)(145*flash)));
-     c.drawRect(x,fy-h*.018f,x+w,fy+h*.018f,fxPaint);
-    }
-    fxPaint.setBlendMode(null);
-    c.restore();
+  // =====================================================================
+  //  图片：按屏幕尺寸预缩放，避免每帧缩放 1229x1536 大图
+  // =====================================================================
+  void rebuild(int W, int H) {
+   lW = W; lH = H;
+   int th = (int) Math.ceil(H * 1.2f);
+   for (int i = 0; i < N; i++) {
+    Bitmap old = bmp[i];
+    bmp[i] = prep(RES[i], th);
+    if (old != null && old != bmp[i]) old.recycle();
+    bShader[i] = new BitmapShader(bmp[i], Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+    imgPaint[i] = new Paint(Paint.FILTER_BITMAP_FLAG);
+    imgPaint[i].setShader(bShader[i]);
    }
   }
-  int withAlpha(int color,int a){return(color&0x00ffffff)|(Math.max(0,Math.min(255,a))<<24);}
+
+  Bitmap prep(int id, int targetH) {
+   BitmapFactory.Options o = new BitmapFactory.Options();
+   o.inJustDecodeBounds = true;
+   BitmapFactory.decodeResource(getResources(), id, o);
+   int ss = 1;
+   while (o.outHeight / (ss * 2) >= targetH) ss *= 2;
+   BitmapFactory.Options o2 = new BitmapFactory.Options();
+   o2.inSampleSize = ss;
+   Bitmap b = BitmapFactory.decodeResource(getResources(), id, o2);
+   if (b.getHeight() > targetH) {
+    int tw = Math.round(b.getWidth() * (float) targetH / b.getHeight());
+    Bitmap s = Bitmap.createScaledBitmap(b, tw, targetH, true);
+    if (s != b) b.recycle();
+    b = s;
+   }
+   return b;
+  }
+
+  // =====================================================================
+  //  触摸(主线程收到 → 转到渲染线程处理)
+  // =====================================================================
+  @Override public void onTouchEvent(MotionEvent e) {
+   final int a = e.getActionMasked();
+   final float x = e.getX(), y = e.getY();
+   rh.post(new Runnable() { public void run() { handleTouch(a, x, y); } });
+  }
+
+  void handleTouch(int a, float x, float y) {
+   int sw = surfW, sh = surfH;
+   if (sw <= 0 || sh <= 0) return;
+   boolean portrait = sh > sw;
+   float W = portrait ? sh : sw, H = portrait ? sw : sh;
+   float lx = portrait ? y : x;
+   float ly = portrait ? sw - x : y;
+   lx = clamp(lx, 0, W - 1); ly = clamp(ly, 0, H);
+   float f = clamp(lx / W * 5f - .5f, 0, 4);
+
+   if (a == MotionEvent.ACTION_DOWN) {
+    touching = true;
+    fx = fxT = lx; fy = fyT = ly;
+    focusT = f;
+    int idx = clampI(Math.round(f), 0, 4);
+    lastActive = idx;
+    sweepT[idx] = 0f;                 // 点击：立刻触发炫光
+    burstT = 0f; burstX = lx; burstY = ly; burstIdx = idx;
+    pulse = 1f;                       // 点击：轻微放大
+   } else if (a == MotionEvent.ACTION_MOVE) {
+    if (!touching) { touching = true; fx = lx; fy = ly; }
+    fxT = lx; fyT = ly;
+    focusT = f;
+   } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+    touching = false;
+   } else return;
+   requestFrame();
+  }
+
+  // =====================================================================
+  //  陀螺仪：对绕设备 X 轴的角速度积分，得到“晃动量”来推动焦点
+  //  (人物排列方向始终沿设备 Y 轴：竖屏时是上下方向，横屏时是左右方向)
+  // =====================================================================
+  @Override public void onSensorChanged(SensorEvent e) {
+   long ts = e.timestamp;
+   float dt = (ts - lastSensorNs) / 1e9f;
+   lastSensorNs = ts;
+   if (touching || dt <= 0f || dt > 0.2f) return;
+   float wx = e.values[0];
+   float aw = Math.abs(wx);
+   if (aw < GYRO_DEADZONE) return;
+   wx = Math.signum(wx) * (aw - GYRO_DEADZONE);
+   float deg = (float) Math.toDegrees(wx * dt);
+   float dir = gyroInvert ? -dirSign : dirSign;
+   float nf = clamp(focusT - dir * gyroGain * deg, 0f, 4f);
+   if (nf != focusT) { focusT = nf; requestFrame(); }
+  }
+  @Override public void onAccuracyChanged(Sensor s, int acc) { }
+
+  // =====================================================================
+  //  帧循环
+  // =====================================================================
+  void requestFrame() {
+   if (!framePending && visible && chor != null) {
+    framePending = true;
+    chor.postFrameCallback(this);
+   }
+  }
+
+  @Override public void doFrame(long nanos) {
+   framePending = false;
+   if (!visible) return;
+   float dt = lastNanos == 0 ? 16.7f : (nanos - lastNanos) / 1e6f;
+   lastNanos = nanos;
+   dt = clamp(dt, 1f, 50f);
+   boolean more = step(dt);
+   draw();
+   if (more) requestFrame(); else lastNanos = 0;
+  }
+
+  boolean step(float dt) {
+   boolean more = false;
+
+   // 焦点：手指按下时非常跟手，陀螺仪时稍柔和
+   float kf = 1f - (float) Math.exp(-dt / (touching ? K_TOUCH_FOCUS : K_FREE_FOCUS));
+   focus += (focusT - focus) * kf;
+   if (Math.abs(focusT - focus) > .002f) more = true; else focus = focusT;
+
+   // 触摸强度 / 点击脉冲 / 手指位置平滑
+   float ta = touching ? 1f : 0f;
+   touchAmt += (ta - touchAmt) * (1f - (float) Math.exp(-dt / (touching ? 70f : 180f)));
+   if (Math.abs(ta - touchAmt) > .004f) more = true; else touchAmt = ta;
+   pulse *= (float) Math.exp(-dt / 140f);
+   if (pulse > .01f) more = true; else pulse = 0f;
+   float kp = 1f - (float) Math.exp(-dt / 30f);
+   fx += (fxT - fx) * kp; fy += (fyT - fy) * kp;
+   if (touchAmt > 0f && (Math.abs(fxT - fx) > .5f || Math.abs(fyT - fy) > .5f)) more = true;
+
+   // 人物栏宽度：焦点栏变宽，邻栏平滑让位
+   float kw = 1f - (float) Math.exp(-dt / 90f);
+   for (int i = 0; i < N; i++) {
+    float e = Math.max(0f, 1f - Math.abs(i - focus));
+    float wt = .19f + (.05f + .02f * touchAmt) * e;
+    float d = wt - wid[i];
+    if (Math.abs(d) > .0004f) { wid[i] += d * kw; more = true; } else wid[i] = wt;
+   }
+
+   // 切换到新人物：立刻触发一次炫光
+   int act = clampI(Math.round(focus), 0, 4);
+   if (act != lastActive) {
+    if (lastActive != -1) sweepT[act] = 0f;
+    lastActive = act;
+   }
+
+   // 炫光 / 光爆计时
+   for (int i = 0; i < N; i++) {
+    if (sweepT[i] >= 0f) {
+     sweepT[i] += dt;
+     if (sweepT[i] >= SWEEP_MS) sweepT[i] = -1f; else more = true;
+    }
+   }
+   if (burstT >= 0f) {
+    burstT += dt;
+    if (burstT >= BURST_MS) burstT = -1f; else more = true;
+   }
+   return more;
+  }
+
+  // =====================================================================
+  //  绘制
+  // =====================================================================
+  void draw() {
+   synchronized (lock) {
+    if (!surfaceOk) return;
+    SurfaceHolder h = getSurfaceHolder();
+    Canvas c = null;
+    try {
+     c = h.lockHardwareCanvas();
+    } catch (Exception ex) {
+     try { c = h.lockCanvas(); } catch (Exception ex2) { return; }
+    }
+    if (c == null) return;
+    try {
+     render(c);
+    } finally {
+     try { h.unlockCanvasAndPost(c); } catch (Exception ignored) { }
+    }
+   }
+  }
+
+  void render(Canvas c) {
+   int cw = c.getWidth(), chh = c.getHeight();
+   boolean portrait = chh > cw;
+   int W = portrait ? chh : cw, H = portrait ? cw : chh;
+   if (W != lW || H != lH) rebuild(W, H);
+
+   c.drawColor(BG);
+   c.save();
+   if (portrait) { c.rotate(90); c.translate(0, -cw); }
+
+   float total = 0f;
+   for (int i = 0; i < N; i++) total += wid[i];
+   float acc = 0f; int prev = 0;
+   for (int i = 0; i < N; i++) {
+    acc += wid[i];
+    int next = (i == N - 1) ? W : Math.round(W * acc / total);   // 边界取整，避免缝隙
+    drawStrip(c, i, prev, next - prev, H);
+    prev = next;
+   }
+   c.restore();
+  }
+
+  void drawStrip(Canvas c, int i, int x, int w, int H) {
+   if (w <= 0) return;
+   float prox = Math.max(0f, 1f - Math.abs(i - focus));
+
+   // ---- 放大：焦点轻放大，按住更大一点，点击瞬间再弹一下 ----
+   float zoom = 1f + prox * (.05f + .05f * touchAmt + .045f * pulse);
+   Bitmap b = bmp[i];
+   float PW = b.getWidth(), PH = b.getHeight();
+   float da = (float) w / H;
+   float sH = PH * .87f, sW = sH * da;
+   if (sW > PW) { sW = PW; sH = sW / da; }
+   sW /= zoom; sH /= zoom;
+
+   // ---- 画面朝手指方向平移：放大的“中心”跟着手指走 ----
+   float fxn = clamp((fx - x) / w, 0f, 1f) * 2f - 1f;
+   float fyn = clamp(fy / H, 0f, 1f) * 2f - 1f;
+   float pan = touchAmt * prox;
+   float nx = clamp(fxn * pan * .5f + clamp(focus - i, -1f, 1f) * .35f, -1f, 1f);
+   float ny = clamp(fyn * pan * .8f, -1f, 1f);
+   float cx = PW / 2f + (PW - sW) / 2f * nx;
+   float cy = PH / 2f + (PH - sH) / 2f * ny;
+   float s = w / sW;
+   m.setScale(s, s);
+   m.postTranslate(x - (cx - sW / 2f) * s, -(cy - sH / 2f) * s);
+   bShader[i].setLocalMatrix(m);
+   imgPaint[i].setAlpha((int) (160 + 95 * prox));
+   c.drawRect(x, 0, x + w, H, imgPaint[i]);
+
+   // ---- 特效 ----
+   boolean sweeping = sweepT[i] >= 0f;
+   boolean fingerFx = touchAmt > .01f && prox > .02f;
+   boolean burst = burstT >= 0f && burstIdx == i;
+   if (!sweeping && !fingerFx && !burst) return;
+
+   c.save();
+   c.clipRect(x, 0, x + w, H);
+
+   if (fingerFx) {
+    float a = touchAmt * prox;
+    float r = w * 1.15f;
+    glowPaint[i].setAlpha(a255(200 * a));
+    c.save(); c.translate(fx, fy); c.scale(r, r); c.drawCircle(0, 0, 1, glowPaint[i]); c.restore();
+    whiteGlow.setAlpha(a255(140 * a));
+    c.save(); c.translate(fx, fy); c.scale(r * .38f, r * .38f); c.drawCircle(0, 0, 1, whiteGlow); c.restore();
+    drawBand(c, i, x, w, fy, .07f, 105f * a);       // 跟随手指的光带
+   }
+
+   if (sweeping) {
+    float t = sweepT[i] / SWEEP_MS;
+    float e = 1f - (1f - t) * (1f - t) * (1f - t);   // ease-out：先快后缓
+    float cyb = H * (1.25f - e * 1.5f);              // 由下往上快速扫过
+    float fade = (1f - t * t * t) * Math.min(1f, t * 12f);
+    fillPaint[i].setAlpha(a255(85f * (1f - t) * (1f - t)));   // 整栏瞬间提亮
+    c.drawRect(x, 0, x + w, H, fillPaint[i]);
+    drawBand(c, i, x, w, cyb, .12f, 255f * fade);
+   }
+
+   if (burst) {
+    float u = burstT / BURST_MS;
+    float r = w * (.5f + 1.3f * (1f - (1f - u) * (1f - u)));
+    whiteGlow.setAlpha(a255(230f * (1f - u) * (float) Math.sqrt(1f - u)));
+    c.save(); c.translate(burstX, burstY); c.scale(r, r); c.drawCircle(0, 0, 1, whiteGlow); c.restore();
+   }
+   c.restore();
+  }
+
+  void drawBand(Canvas c, int i, int x, int w, float cy, float thick, float alpha) {
+   if (alpha < 1f) return;
+   Paint p = bandPaint[i];
+   p.setAlpha(a255(alpha));
+   c.save();
+   c.translate(x + w * .5f, cy);
+   c.rotate(-16f);
+   c.scale(w * .85f, lH * thick);
+   c.drawRect(-1f, -1f, 1f, 1f, p);
+   c.restore();
+  }
  }
+
+ // ---------------------------------------------------------------------
+ static int al(int color, int a) { return (color & 0x00ffffff) | (a << 24); }
+ static int a255(float v) { return v < 0f ? 0 : (v > 255f ? 255 : (int) v); }
+ static float clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+ static int clampI(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 }
